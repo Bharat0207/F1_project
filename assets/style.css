@@ -1,0 +1,101 @@
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&display=swap');
+
+html,
+body,
+[class*="css"]{
+    font-family: 'Rajdhani', sans-serif;
+}
+
+.stApp{
+
+    background:#090B10;
+
+}
+
+#MainMenu{
+    visibility:hidden;
+}
+
+footer{
+    visibility:hidden;
+}
+
+header{
+    visibility:hidden;
+}
+
+.block-container{
+
+    max-width:1500px;
+
+    padding-top:1rem;
+
+}
+
+.navbar{
+
+    background:#11151F;
+
+    padding:18px;
+
+    border-radius:18px;
+
+    border:1px solid #262D39;
+
+    margin-bottom:25px;
+
+}
+
+.hero{
+
+    background:#11151F;
+
+    border-radius:24px;
+
+    padding:30px;
+
+    border:1px solid #262D39;
+
+}
+
+.section{
+
+    margin-top:30px;
+
+}
+
+.driver-card{
+
+    background:#141A23;
+
+    border-radius:18px;
+
+    padding:20px;
+
+    border:1px solid #2D3748;
+
+    text-align:center;
+
+    transition:0.3s;
+
+}
+
+.driver-card:hover{
+
+    transform:translateY(-5px);
+
+    border:1px solid #E10600;
+
+}
+
+.standing{
+
+    background:#11151F;
+
+    padding:12px;
+
+    border-radius:12px;
+
+    margin-bottom:10px;
+
+}
