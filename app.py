@@ -3,7 +3,6 @@ from streamlit_option_menu import option_menu
 from pages.race_summary import show_race_summary
 from pages.telemetry import show_telemetry
 from pages.strategy import show_strategy
-from pages.analytics import show_analytics
 from pages.replay import show_replay
 from pages.season import show_season
 
@@ -35,7 +34,6 @@ selected = option_menu(
     options=[
         "Home",
         "Race Summary",
-        "Analytics",
         "Strategy",
         "Telemetry",
         "Replay",
@@ -84,7 +82,6 @@ page_handlers = {
     "Race Summary": lambda: show_race_summary(),
     "Tyre Strategy": lambda: show_strategy(),
     "Strategy": lambda: show_strategy(),
-    "Analytics": lambda: show_analytics(),
     "Telemetry": lambda: show_telemetry(),
     "Replay": lambda: show_replay(),
     "Season": lambda: show_season(),

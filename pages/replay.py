@@ -1,300 +1,467 @@
-from datetime import datetime
-import streamlit as st
+from datetime import datetime, date
+import os
+import fastf1
+import fastf1.events
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 import requests
+import streamlit as st
 
-DRIVER_COLORS = {
-    "VER": "#3671C6", "PER": "#3671C6",
-    "HAM": "#27F4D2", "RUS": "#27F4D2",
-    "LEC": "#E8002D", "SAI": "#E8002D",
-    "NOR": "#FF8000", "PIA": "#FF8000",
-    "ALO": "#229971", "STR": "#229971",
-    "GAS": "#0093CC", "OCO": "#0093CC",
-    "TSU": "#6692FF", "LAW": "#6692FF",
-    "ALB": "#64C4FF", "COL": "#64C4FF",
-    "MAG": "#B6BABD", "HUL": "#B6BABD",
-    "BOT": "#52E252", "ZHO": "#52E252",
-    "BEA": "#E8002D", "ANT": "#27F4D2", "HAD": "#3671C6"
-}
+# Direct FastF1 to Jolpica backend endpoint
+try:
+    import fastf1.ergast
+    fastf1.ergast.interface.BASE_URL = "https://api.jolpi.ca/ergast/f1"
+except Exception:
+    pass
 
-# Pre-defined F1 circuit geometry outlines
-CIRCUIT_GEOMETRIES = {
-    "melbourne": {
-        "x": [0, 200, 400, 650, 800, 750, 600, 450, 300, 200, 100, -50, -180, -220, -180, -80, 0],
-        "y": [0, 20, 60, 150, 300, 480, 580, 550, 450, 380, 310, 240, 150, 50, -20, -10, 0]
-    },
-    "monza": {
-        "x": [0, 400, 800, 1200, 1220, 1180, 1100, 1000, 900, 850, 700, 500, 200, 50, 0, 0],
-        "y": [0, 10, 20, 30, 150, 250, 260, 200, 220, 350, 380, 280, 270, 180, 100, 0]
-    },
-    "monaco": {
-        "x": [0, 150, 220, 180, 120, 160, 250, 280, 240, 190, 110, 40, -20, -50, 0],
-        "y": [0, 30, 120, 180, 160, 220, 210, 130, 80, 70, 90, 60, 30, -10, 0]
-    },
-    "silverstone": {
-        "x": [0, 300, 500, 600, 550, 450, 480, 620, 700, 650, 500, 350, 200, 100, 0],
-        "y": [0, 20, 80, 200, 320, 310, 420, 400, 280, 180, 150, 220, 200, 100, 0]
-    },
-    "spa": {
-        "x": [0, 200, 350, 400, 300, 250, 320, 450, 500, 420, 280, 150, 50, -30, 0],
-        "y": [0, 50, 180, 350, 420, 500, 580, 520, 380, 250, 220, 260, 180, 80, 0]
-    }
-}
-
-
-def get_circuit_outline(location_name):
-    """Generates a smooth circuit path geometry matching the event location."""
-    key = location_name.lower().replace(" ", "_")
-    for track_key, coords in CIRCUIT_GEOMETRIES.items():
-        if track_key in key or key in track_key:
-            t_orig = np.linspace(0, 1, len(coords["x"]))
-            t_smooth = np.linspace(0, 1, 350)
-            x_smooth = np.interp(t_smooth, t_orig, coords["x"])
-            y_smooth = np.interp(t_smooth, t_orig, coords["y"])
-            return pd.DataFrame({"x": x_smooth, "y": y_smooth})
-
-    # Default F1 organic circuit shape fallback
-    t = np.linspace(0, 2 * np.pi, 350)
-    x = 800 * np.sin(t) + 300 * np.sin(2 * t) + 120 * np.cos(3 * t)
-    y = 500 * np.cos(t) + 200 * np.cos(2 * t) - 100 * np.sin(3 * t)
-    return pd.DataFrame({"x": x, "y": y})
+# Initialize local FastF1 cache directory
+os.makedirs('cache', exist_ok=True)
+try:
+    fastf1.Cache.enable_cache('cache')
+except Exception:
+    pass
 
 
 @st.cache_data(ttl=3600)
-def fetch_schedule_for_year(year):
+def fetch_season_schedule(year: int):
+    """Fetches full race calendar directly from Jolpica API."""
     url = f"https://api.jolpi.ca/ergast/f1/{year}.json"
     try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            races = response.json()["MRData"]["RaceTable"]["Races"]
-            parsed = []
+        res = requests.get(url, timeout=6)
+        if res.status_code == 200:
+            return res.json()["MRData"]["RaceTable"]["Races"]
+    except Exception:
+        pass
+    return []
+
+
+def patch_fastf1_schedule():
+    """Patches FastF1's get_event_schedule to fall back to Jolpica API if FastF1 backends fail."""
+    original_get_event_schedule = fastf1.events.get_event_schedule
+
+    def fallback_get_event_schedule(year, include_testing=False, backend=None, force_ergast=False):
+        try:
+            return original_get_event_schedule(year, include_testing=include_testing, backend=backend, force_ergast=force_ergast)
+        except Exception:
+            races = fetch_season_schedule(year)
+            schedule_data = []
             for r in races:
-                parsed.append({
-                    "RoundNumber": int(r["round"]),
-                    "EventName": r["raceName"],
-                    "Location": r["Circuit"]["Location"]["locality"]
+                rd = int(r.get('round', 1))
+                r_name = r.get('raceName', f'Round {rd}')
+                country = r.get('Circuit', {}).get('Location', {}).get('country', '')
+                location = r.get('Circuit', {}).get('Location', {}).get('locality', '')
+                date_str = r.get('date', '2024-01-01')
+                event_dt = pd.to_datetime(date_str)
+
+                schedule_data.append({
+                    'RoundNumber': rd,
+                    'Country': country,
+                    'Location': location,
+                    'OfficialEventName': r_name,
+                    'EventName': r_name,
+                    'EventDate': event_dt,
+                    'EventFormat': 'conventional',
+                    'Session1': 'Practice 1',
+                    'Session1Date': event_dt,
+                    'Session1DateUtc': event_dt,
+                    'Session2': 'Practice 2',
+                    'Session2Date': event_dt,
+                    'Session2DateUtc': event_dt,
+                    'Session3': 'Practice 3',
+                    'Session3Date': event_dt,
+                    'Session3DateUtc': event_dt,
+                    'Session4': 'Qualifying',
+                    'Session4Date': event_dt,
+                    'Session4DateUtc': event_dt,
+                    'Session5': 'Race',
+                    'Session5Date': event_dt,
+                    'Session5DateUtc': event_dt,
+                    'F1ApiSupport': True
                 })
-            return pd.DataFrame(parsed)
-    except Exception:
-        pass
-    return pd.DataFrame()
+            df = pd.DataFrame(schedule_data)
+            return fastf1.events.EventSchedule(df, year=year)
+
+    fastf1.events.get_event_schedule = fallback_get_event_schedule
+    fastf1.get_event_schedule = fallback_get_event_schedule
 
 
-@st.cache_data(ttl=3600)
-def fetch_circuit_and_replay_data(year, location_name, round_number):
-    track_df = pd.DataFrame()
-    replay_frames = []
+# Apply schedule fallback patch
+patch_fastf1_schedule()
 
-    # 1. Attempt to fetch recorded GPS coordinates from OpenF1
+TEAM_COLORS = {
+    "Red Bull Racing": "#3671C6",
+    "Ferrari": "#E8002D",
+    "McLaren": "#FF8000",
+    "Mercedes": "#27F4D2",
+    "Aston Martin": "#229971",
+    "Alpine": "#0093CC",
+    "Williams": "#64C4FF",
+    "RB": "#6692FF",
+    "Racing Bulls": "#6692FF",
+    "AlphaTauri": "#5E8FAA",
+    "Haas F1 Team": "#B6BABD",
+    "Kick Sauber": "#52E252",
+    "Alfa Romeo": "#C92D4B",
+    "Cadillac": "#FFD700",
+    "Audi": "#00E5FF"
+}
+
+
+def get_team_color(team_name: str) -> str:
+    """Returns matching HEX team color or fallback."""
+    for k, v in TEAM_COLORS.items():
+        if k.lower() in str(team_name).lower():
+            return v
+    return "#FFFFFF"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_full_replay_data(year: int, round_num: int, race_name: str, race_date_str: str, sample_rate_sec: int = 2):
+    """Loads session telemetry with automated schedule fallback handling."""
+    if race_date_str:
+        try:
+            r_date = datetime.strptime(race_date_str, "%Y-%m-%d").date()
+            if r_date > date.today():
+                raise ValueError(f"The {year} {race_name} is scheduled for {race_date_str} and has not taken place yet.")
+        except ValueError as ve:
+            if "has not taken place yet" in str(ve):
+                raise ve
+            pass
+
+    session = None
+
+    # Load session using round number or clean race name
     try:
-        sess_url = f"https://api.openf1.org/v1/sessions?year={year}&session_name=Race"
-        sess_res = requests.get(sess_url, timeout=4)
-
-        session_key = None
-        if sess_res.status_code == 200 and sess_res.json():
-            for s in sess_res.json():
-                loc = str(s.get("location", "")).lower()
-                cntry = str(s.get("country_name", "")).lower()
-                target_loc = location_name.lower()
-                if target_loc in loc or loc in target_loc or target_loc in cntry:
-                    session_key = s.get("session_key")
-                    break
-
-        if session_key:
-            loc_url = f"https://api.openf1.org/v1/location?session_key={session_key}"
-            loc_res = requests.get(loc_url, timeout=5)
-            if loc_res.status_code == 200 and loc_res.json():
-                df_raw = pd.DataFrame(loc_res.json())
-                if not df_raw.empty and "x" in df_raw.columns and "y" in df_raw.columns:
-                    track_df = df_raw.dropna(subset=["x", "y"])[::4].copy()
+        session = fastf1.get_session(int(year), int(round_num), 'R')
+        session.load(laps=True, telemetry=True, weather=False, messages=False)
     except Exception:
-        pass
+        try:
+            clean_name = race_name.replace("Grand Prix", "").strip()
+            session = fastf1.get_session(int(year), clean_name, 'R')
+            session.load(laps=True, telemetry=True, weather=False, messages=False)
+        except Exception as e:
+            raise ValueError(f"Telemetry unavailable for {year} {race_name}: {str(e)}")
 
-    # 2. Fallback to pre-built circuit geometry if API coordinates are unavailable
-    if track_df.empty:
-        track_df = get_circuit_outline(location_name)
+    if session is None or session.laps.empty:
+        raise ValueError("No lap timing or position telemetry recorded for this session.")
 
-    # 3. Fetch Lap-by-Lap driver standings to animate positions along the circuit
+    # Extract circuit outline
+    fastest_lap = session.laps.pick_fastest()
+    circuit_tel = fastest_lap.get_telemetry()
+    if circuit_tel.empty:
+        raise ValueError("No circuit telemetry coordinates available.")
+
+    track_x = circuit_tel['X'].tolist()
+    track_y = circuit_tel['Y'].tolist()
+
+    # Safety Car detection (Status code 4)
+    sc_active_times = set()
     try:
-        laps_url = f"https://api.jolpi.ca/ergast/f1/{year}/{round_number}/laps.json?limit=2000"
-        laps_res = requests.get(laps_url, timeout=8)
-
-        if laps_res.status_code == 200:
-            races = laps_res.json()["MRData"]["RaceTable"]["Races"]
-            if races and "Laps" in races[0]:
-                track_points = track_df[["x", "y"]].reset_index(drop=True)
-                num_points = len(track_points)
-
-                for lap_obj in races[0]["Laps"]:
-                    lap_num = int(lap_obj["number"])
-                    total_drivers = len(lap_obj["Timings"])
-
-                    for timing in lap_obj["Timings"]:
-                        d_code = timing["driverId"][:3].upper()
-                        pos = int(timing["position"])
-
-                        # Calculate relative track distance offset along circuit geometry
-                        frac = (total_drivers - pos + 0.5) / total_drivers
-                        point_idx = int(frac * (num_points - 1))
-                        point_idx = max(0, min(num_points - 1, point_idx))
-
-                        coords = track_points.iloc[point_idx]
-
-                        replay_frames.append({
-                            "Lap": lap_num,
-                            "Code": d_code,
-                            "Position": pos,
-                            "x": coords["x"],
-                            "y": coords["y"]
-                        })
+        if hasattr(session, 'track_status') and not session.track_status.empty:
+            sc_statuses = session.track_status[session.track_status['Status'].astype(str).str.contains('4')]
+            for _, sc_row in sc_statuses.iterrows():
+                start_sec = int(sc_row['Time'].total_seconds())
+                for t in range(start_sec, start_sec + 120):
+                    sc_active_times.add(t)
     except Exception:
         pass
 
-    return track_df, pd.DataFrame(replay_frames)
+    driver_frames = []
+
+    for drv in session.drivers:
+        try:
+            drv_laps = session.laps.pick_driver(drv)
+            if drv_laps.empty:
+                continue
+
+            drv_code = drv_laps['Driver'].iloc[0]
+            team_name = drv_laps['Team'].iloc[0]
+            color = get_team_color(team_name)
+
+            tel = drv_laps.get_telemetry()
+            if tel.empty:
+                continue
+
+            max_driver_time = int(tel['Time'].dt.total_seconds().max())
+
+            tel['TimeSec'] = tel['Time'].dt.total_seconds().astype(int)
+            grouped = tel.groupby(tel['TimeSec'] // sample_rate_sec).first().reset_index()
+
+            for _, row in grouped.iterrows():
+                t_sec = int(row['TimeSec'])
+                drs_raw = str(row.get('DRS', '0'))
+                drs_str = "ON" if drs_raw in ['10', '12', '14', '1'] else "OFF"
+                compound_str = str(row.get('Compound', 'N/A'))
+                lap_num = int(row.get('LapNumber', 1))
+
+                status_str = "OK"
+                if t_sec > (max_driver_time - 30) and max_driver_time < 5000:
+                    status_str = "OUT"
+
+                driver_frames.append({
+                    'TimeSec': t_sec,
+                    'Driver': drv_code,
+                    'Team': team_name,
+                    'Color': color,
+                    'X': float(row['X']),
+                    'Y': float(row['Y']),
+                    'Speed': int(row.get('Speed', 0)),
+                    'Gear': int(row.get('nGear', 0)),
+                    'DRS': drs_str,
+                    'Compound': compound_str,
+                    'Distance': float(row.get('Distance', 0)),
+                    'LapNumber': lap_num,
+                    'Status': status_str
+                })
+        except Exception:
+            continue
+
+    df_all = pd.DataFrame(driver_frames)
+
+    # Compute Safety Car positions (~500m ahead of leader)
+    sc_frames = []
+    if not df_all.empty:
+        unique_times = sorted(df_all['TimeSec'].unique())
+        for t in unique_times:
+            if t in sc_active_times:
+                t_df = df_all[df_all['TimeSec'] == t].sort_values(by="Distance", ascending=False)
+                if not t_df.empty:
+                    leader = t_df.iloc[0]
+                    sc_frames.append({
+                        'TimeSec': t,
+                        'Driver': 'SC',
+                        'Team': 'Safety Car',
+                        'Color': '#FF9900',
+                        'X': leader['X'] + 500.0,
+                        'Y': leader['Y'] + 500.0,
+                        'Speed': min(140, leader['Speed']),
+                        'Gear': 3,
+                        'DRS': 'OFF',
+                        'Compound': 'N/A',
+                        'Distance': leader['Distance'] + 500.0,
+                        'LapNumber': leader['LapNumber'],
+                        'Status': 'SC ACTIVE'
+                    })
+
+    if sc_frames:
+        df_sc = pd.DataFrame(sc_frames)
+        df_all = pd.concat([df_all, df_sc], ignore_index=True)
+
+    return track_x, track_y, df_all
 
 
 def show_replay():
-    st.header("Animated 2D Track Race Replay")
-    st.caption("Press Play or scrub through laps to watch driver dots race along the circuit layout.")
+    st.markdown("<h1 style='text-transform: uppercase;'>RACE REPLAY & INSIGHTS MENU</h1>", unsafe_allow_html=True)
 
+    col_yr, col_rd, col_step = st.columns([1, 2, 1])
     current_year = datetime.now().year
+    available_years = list(range(current_year, 2017, -1))
 
-    col_season, col_race = st.columns([1, 2])
+    with col_yr:
+        default_idx = available_years.index(2024) if 2024 in available_years else 0
+        selected_year = st.selectbox("Season:", options=available_years, index=default_idx)
 
-    with col_season:
-        selected_year = st.selectbox("Select Season:", options=list(range(current_year, 2011, -1)), index=0)
-
-    schedule_df = fetch_schedule_for_year(selected_year)
-    if schedule_df.empty:
-        st.warning(f"No schedule data available for the {selected_year} season.")
+    schedule = fetch_season_schedule(selected_year)
+    if not schedule:
+        st.warning(f"No schedule data available for {selected_year}.")
         return
 
     race_options = {
-        f"Round {row['RoundNumber']}: {row['EventName']} ({row['Location']})": (row["RoundNumber"], row["Location"])
-        for _, row in schedule_df.iterrows()
+        f"Round {r['round']}: {r['raceName']}": (int(r['round']), r['raceName'], r.get('date', ''))
+        for r in schedule
     }
 
-    with col_race:
-        selected_label = st.selectbox("Select Grand Prix:", list(race_options.keys()))
+    with col_rd:
+        selected_race_label = st.selectbox("Select Grand Prix:", options=list(race_options.keys()))
+        selected_round, selected_race_name, selected_race_date = race_options[selected_race_label]
 
-    selected_round, location_name = race_options[selected_label]
-    st.markdown("---")
+    with col_step:
+        sample_interval = st.selectbox("Playback Quality (Step Sec):", options=[1, 2, 5], index=1)
 
-    with st.spinner(f"Loading 2D circuit layout and race replay for {selected_year} {location_name}..."):
-        track_df, replay_df = fetch_circuit_and_replay_data(selected_year, location_name, selected_round)
+    if st.button("Load Race Replay Data", use_container_width=True):
+        st.session_state.load_replay_trigger = True
 
-    if replay_df.empty:
-        st.info("Lap replay telemetry for this round is currently unavailable.")
-        return
+    if st.session_state.get("load_replay_trigger", False):
+        with st.spinner("Processing telemetry coordinates, Safety Car simulation, and leaderboards..."):
+            try:
+                track_x, track_y, df_replay = load_full_replay_data(
+                    selected_year, selected_round, selected_race_name, selected_race_date, sample_interval
+                )
 
-    total_laps = int(replay_df["Lap"].max())
+                if df_replay.empty:
+                    st.warning("No telemetry data recorded for this race.")
+                    return
 
-    st.markdown("### Circuit Spatial Playback")
+                col_map, col_leaderboard = st.columns([3, 1])
+                unique_times = sorted(df_replay['TimeSec'].unique())
 
-    fig = go.Figure()
+                with col_map:
+                    fig = go.Figure()
 
-    # Draw Circuit Layout Path
-    fig.add_trace(go.Scatter(
-        x=track_df["x"],
-        y=track_df["y"],
-        mode="lines",
-        line=dict(color="#555555", width=5),
-        hoverinfo="skip",
-        name="Circuit Layout"
-    ))
+                    fig.add_trace(go.Scatter(
+                        x=track_x,
+                        y=track_y,
+                        mode='lines',
+                        line=dict(color='#2A2D3A', width=8),
+                        hoverinfo='none',
+                        name='Circuit'
+                    ))
 
-    # Construct Animation Frames
-    frames = []
-    for lap_num in range(1, total_laps + 1):
-        lap_data = replay_df[replay_df["Lap"] == lap_num]
+                    frames = []
+                    for t in unique_times:
+                        t_df = df_replay[df_replay['TimeSec'] == t].sort_values(by="Distance", ascending=False)
+                        custom_data = t_df[['Team', 'Speed', 'Gear', 'DRS', 'Compound', 'Status', 'LapNumber']].values
+                        marker_sizes = [18 if drv == 'SC' else 13 for drv in t_df['Driver']]
 
-        frame_traces = [
-            go.Scatter(x=track_df["x"], y=track_df["y"], mode="lines", line=dict(color="#555555", width=5), hoverinfo="skip")
-        ]
+                        frame_traces = [
+                            go.Scatter(
+                                x=track_x,
+                                y=track_y,
+                                mode='lines',
+                                line=dict(color='#2A2D3A', width=8),
+                                hoverinfo='none',
+                                showlegend=False
+                            ),
+                            go.Scatter(
+                                x=t_df['X'],
+                                y=t_df['Y'],
+                                mode='markers+text',
+                                marker=dict(
+                                    size=marker_sizes,
+                                    color=t_df['Color'].tolist(),
+                                    line=dict(width=1.5, color='#FFFFFF')
+                                ),
+                                text=t_df['Driver'],
+                                textposition='top center',
+                                textfont=dict(size=11, color='#FFFFFF'),
+                                customdata=custom_data,
+                                hovertemplate=(
+                                    "<b>%{text}</b> (%{customdata[0]})<br>"
+                                    "Status: %{customdata[5]} | Lap: %{customdata[6]}<br>"
+                                    "Speed: %{customdata[1]} km/h<br>"
+                                    "Gear: %{customdata[2]} | DRS: %{customdata[3]}<br>"
+                                    "Tyre: %{customdata[4]}"
+                                    "<extra></extra>"
+                                ),
+                                name='Drivers'
+                            )
+                        ]
 
-        for _, d_row in lap_data.iterrows():
-            d_code = d_row["Code"]
-            d_color = DRIVER_COLORS.get(d_code, "#00CC96")
+                        time_str = str(pd.Timedelta(seconds=t)).split('.')[0]
+                        frames.append(go.Frame(data=frame_traces, name=str(t), layout=dict(title=f"Race Time: {time_str}")))
 
-            frame_traces.append(go.Scatter(
-                x=[d_row["x"]],
-                y=[d_row["y"]],
-                mode="markers+text",
-                marker=dict(size=14, color=d_color, line=dict(color="white", width=1.5)),
-                text=f"P{d_row['Position']} {d_code}",
-                textposition="top center",
-                name=d_code,
-                hoverinfo="text",
-                hovertext=f"<b>{d_code}</b><br>Position: P{d_row['Position']}<br>Lap: {lap_num}"
-            ))
+                    first_df = df_replay[df_replay['TimeSec'] == unique_times[0]]
+                    first_custom = first_df[['Team', 'Speed', 'Gear', 'DRS', 'Compound', 'Status', 'LapNumber']].values
+                    first_sizes = [18 if drv == 'SC' else 13 for drv in first_df['Driver']]
 
-        frames.append(go.Frame(data=frame_traces, name=str(lap_num)))
+                    fig.add_trace(go.Scatter(
+                        x=first_df['X'],
+                        y=first_df['Y'],
+                        mode='markers+text',
+                        marker=dict(
+                            size=first_sizes,
+                            color=first_df['Color'].tolist(),
+                            line=dict(width=1.5, color='#FFFFFF')
+                        ),
+                        text=first_df['Driver'],
+                        textposition='top center',
+                        textfont=dict(size=11, color='#FFFFFF'),
+                        customdata=first_custom,
+                        hovertemplate=(
+                            "<b>%{text}</b> (%{customdata[0]})<br>"
+                            "Status: %{customdata[5]} | Lap: %{customdata[6]}<br>"
+                            "Speed: %{customdata[1]} km/h<br>"
+                            "Gear: %{customdata[2]} | DRS: %{customdata[3]}<br>"
+                            "Tyre: %{customdata[4]}"
+                            "<extra></extra>"
+                        ),
+                        name='Drivers'
+                    ))
 
-    # Initial frame setup (Lap 1)
-    lap1_data = replay_df[replay_df["Lap"] == 1]
-    for _, d_row in lap1_data.iterrows():
-        d_code = d_row["Code"]
-        d_color = DRIVER_COLORS.get(d_code, "#00CC96")
+                    fig.update_layout(
+                        xaxis=dict(visible=False),
+                        yaxis=dict(visible=False, scaleanchor="x", scaleratio=1),
+                        paper_bgcolor='#0f1015',
+                        plot_bgcolor='#0f1015',
+                        height=620,
+                        margin=dict(l=10, r=10, t=40, b=10),
+                        updatemenus=[{
+                            "type": "buttons",
+                            "buttons": [
+                                {
+                                    "label": "Play",
+                                    "method": "animate",
+                                    "args": [None, {"frame": {"duration": 120, "redraw": True}, "fromcurrent": True}]
+                                },
+                                {
+                                    "label": "Pause",
+                                    "method": "animate",
+                                    "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}]
+                                }
+                            ],
+                            "direction": "left",
+                            "pad": {"r": 10, "t": 10},
+                            "showactive": False,
+                            "x": 0.1,
+                            "xanchor": "right",
+                            "y": 0,
+                            "yanchor": "top"
+                        }],
+                        sliders=[{
+                            "active": 0,
+                            "yanchor": "top",
+                            "xanchor": "left",
+                            "currentvalue": {
+                                "font": {"size": 15, "color": "#ffffff"},
+                                "prefix": "Session Time: ",
+                                "visible": True,
+                                "xanchor": "right"
+                            },
+                            "transition": {"duration": 0},
+                            "pad": {"b": 10, "t": 40},
+                            "len": 0.9,
+                            "x": 0.1,
+                            "y": 0,
+                            "steps": [
+                                {
+                                    "args": [[str(t)], {"frame": {"duration": 0, "redraw": True}, "mode": "immediate"}],
+                                    "label": str(pd.Timedelta(seconds=t)).split('.')[0],
+                                    "method": "animate"
+                                } for t in unique_times
+                            ]
+                        }]
+                    )
 
-        fig.add_trace(go.Scatter(
-            x=[d_row["x"]],
-            y=[d_row["y"]],
-            mode="markers+text",
-            marker=dict(size=14, color=d_color, line=dict(color="white", width=1.5)),
-            text=f"P{d_row['Position']} {d_code}",
-            textposition="top center",
-            name=d_code
-        ))
+                    fig.frames = frames
+                    st.plotly_chart(fig, use_container_width=True)
 
-    fig.update_layout(
-        height=650,
-        template="plotly_dark",
-        showlegend=False,
-        margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title=""),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, title="", scaleanchor="x", scaleratio=1),
-        updatemenus=[{
-            "type": "buttons",
-            "showactive": False,
-            "y": -0.05,
-            "x": 0.0,
-            "xanchor": "left",
-            "yanchor": "top",
-            "buttons": [
-                {
-                    "label": "▶ Play Race",
-                    "method": "animate",
-                    "args": [None, {"frame": {"duration": 500, "redraw": True}, "fromcurrent": True}]
-                },
-                {
-                    "label": "❚❚ Pause",
-                    "method": "animate",
-                    "args": [[None], {"frame": {"duration": 0, "redraw": False}, "mode": "immediate"}]
-                }
-            ]
-        }],
-        sliders=[{
-            "active": 0,
-            "yanchor": "top",
-            "xanchor": "left",
-            "currentvalue": {"prefix": "Active Lap: ", "visible": True, "xanchor": "right"},
-            "pad": {"b": 10, "t": 50},
-            "len": 0.85,
-            "x": 0.15,
-            "y": -0.05,
-            "steps": [
-                {
-                    "args": [[str(lap)], {"frame": {"duration": 250, "redraw": True}, "mode": "immediate"}],
-                    "label": str(lap),
-                    "method": "animate"
-                }
-                for lap in range(1, total_laps + 1)
-            ]
-        }]
-    )
+                with col_leaderboard:
+                    st.subheader("Live Leaderboard")
+                    latest_t = unique_times[-1]
+                    latest_df = df_replay[(df_replay['TimeSec'] == latest_t) & (df_replay['Driver'] != 'SC')].sort_values(
+                        by="Distance", ascending=False
+                    ).reset_index(drop=True)
 
-    fig.frames = frames
+                    latest_df['Pos'] = range(1, len(latest_df) + 1)
 
-    st.plotly_chart(fig, width="stretch")
+                    st.dataframe(
+                        latest_df[['Pos', 'Driver', 'Team', 'Compound', 'Status']],
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    st.markdown("---")
+                    st.subheader("Driver Insights")
+
+                    driver_list = sorted(latest_df['Driver'].unique().tolist())
+                    selected_focus = st.selectbox("Focus Driver:", options=driver_list)
+
+                    drv_sample = latest_df[latest_df['Driver'] == selected_focus].iloc[0]
+
+                    st.metric("Top Speed Recorded", f"{drv_sample['Speed']} km/h")
+                    st.metric("Current Gear / DRS", f"G{drv_sample['Gear']} | DRS {drv_sample['DRS']}")
+                    st.metric("Tyre Compound", f"{drv_sample['Compound']}")
+                    st.metric("Status", f"{drv_sample['Status']}")
+
+            except Exception as e:
+                st.info(f"{str(e)}")

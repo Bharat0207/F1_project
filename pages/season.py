@@ -338,7 +338,7 @@ def show_season():
 
                     logo_path = resolve_asset_path("teams", team_name)
                     logo_b64 = load_raw_image_base64(logo_path)
-                    logo_tag = f"<img src='{logo_b64}'/>" if logo_b64 else "🏎️"
+                    logo_tag = f"<img src='{logo_b64}'/>" if logo_b64 else ""
 
                     card_html = textwrap.dedent(f"""
                         <div class='team-card-minimal' style='background: {gradient};'>
